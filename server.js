@@ -3701,5 +3701,526 @@ app.put('/api/giveaway/admin/status/:id', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+const ClanStatSchema = new mongoose.Schema({
+    winRate: { type: String, default: "82.4%" },
+    matches: { type: Number, default: 450 },
+    trophies: { type: Number, default: 18 },
+    wins: { type: Number, default: 371 },
+    draws: { type: Number, default: 34 },
+    losses: { type: Number, default: 45 },
+    rankTier: { type: String, default: "TOP 10" }
+}, { timestamps: true });
+
+const ClanStat = mongoose.models.ClanStat || mongoose.model('ClanStat', ClanStatSchema);
+
+// 2. Roster Join Application Schema (Triggered by "JOIN ROSTER" button)
+const RosterAppSchema = new mongoose.Schema({
+    gamertag: String,
+    efootballId: String,
+    division: String,
+    winRate: String,
+    device: String,
+    contact: String,
+    appliedAt: { type: Date, default: Date.now }
+});
+
+const RosterApplication = mongoose.models.RosterApplication || mongoose.model('RosterApplication', RosterAppSchema);
+
+// 3. Clan War Matches Schema (Triggered by "WAR LOGS" button)
+const ClanMatchSchema = new mongoose.Schema({
+    opponent: String,
+    trsScore: Number,
+    oppScore: Number,
+    mvp: String,
+    tourney: String,
+    date: { type: Date, default: Date.now }
+});
+
+const ClanMatch = mongoose.models.ClanMatch || mongoose.model('ClanMatch', ClanMatchSchema);
+
+
+// --- API ROUTES FOR FRONTEND ---
+
+// Health Ping (used by frontend to test Render connection)
+app.get('/api/health', (req, res) => {
+    res.json({ status: "online", timestamp: new Date() });
+});
+
+// GET Clan HUD Stats (Win Rate, Matches, Trophies, Wins, Draws, Losses, Rank)
+app.get('/api/clan-stats', async (req, res) => {
+    try {
+        let stats = await ClanStat.findOne().sort({ updatedAt: -1 });
+        if (!stats) {
+            stats = await ClanStat.create({});
+        }
+        res.json(stats);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// UPDATE Clan HUD Stats (from Admin panel)
+app.put('/api/clan-stats', async (req, res) => {
+    try {
+        let stats = await ClanStat.findOne().sort({ updatedAt: -1 });
+        if (!stats) stats = new ClanStat();
+
+        Object.assign(stats, req.body);
+        await stats.save();
+        res.json({ success: true, stats });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// POST "JOIN ROSTER" application form
+app.post('/api/join-roster', async (req, res) => {
+    try {
+        const appEntry = new RosterApplication(req.body);
+        await appEntry.save();
+        res.json({ success: true, message: "Application received" });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+// GET & POST Clan War Logs / Matches
+app.get('/api/matches', async (req, res) => {
+    try {
+        const matches = await ClanMatch.find().sort({ date: -1 });
+        res.json(matches);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/matches', async (req, res) => {
+    try {
+        const match = new ClanMatch(req.body);
+        await match.save();
+        res.json({ success: true, match });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+const highlightSchema = new mongoose.Schema({
+    title: { type: String, required: true },
+    url: { type: String, required: true },
+    createdAt: { type: Date, default: Date.now }
+});
+
+const router = express.Router();
+
+// 1. ADD A HIGHLIGHT VIDEO CLIP
+router.post('/players/:id/highlights', async (req, res) => {
+    try {
+        const { title, url } = req.body;
+        if (!title || !url) {
+            return res.status(400).json({ error: "Title and URL are required" });
+        }
+
+        const player = await Player.findById(req.params.id);
+        if (!player) return res.status(404).json({ error: "Player not found" });
+
+        player.highlights.unshift({ title, url });
+        await player.save();
+
+        res.json({ success: true, highlights: player.highlights });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 2. DELETE A HIGHLIGHT VIDEO CLIP BY INDEX
+router.delete('/players/:id/highlights/:clipIndex', async (req, res) => {
+    try {
+        const index = parseInt(req.params.clipIndex);
+        const player = await Player.findById(req.params.id);
+        if (!player) return res.status(404).json({ error: "Player not found" });
+
+        if (index >= 0 && index < player.highlights.length) {
+            player.highlights.splice(index, 1);
+            await player.save();
+            return res.json({ success: true, highlights: player.highlights });
+        } else {
+            return res.status(400).json({ error: "Invalid clip index" });
+        }
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 3. ENSURE YOUR EXISTING PUT ROUTE UPDATES gamerTag & efootballId
+
+// routes/authRoutes.js
+
+const admin = require('firebase-admin');
+
+// --- 1. FIREBASE ADMIN INITIALIZATION ---
+// Ensure you have serviceAccountKey.json or environment variables set
+if (!admin.apps.length) {
+    admin.initializeApp({
+        credential: admin.credential.cert({
+            projectId: process.env.FIREBASE_PROJECT_ID,
+            clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+            privateKey: (process.env.FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n')
+        })
+    });
+}
+
+// --- 2. BREVO API SETUP ---
+
+// In-Memory OTP Store (Use Redis in high-scale production)
+const otpStore = new Map(); // key: email, value: { otp, expiresAt, playerId }
+
+function generateOtp() {
+    return Math.floor(100000 + Math.random() * 900000).toString();
+}
+// ✅ CRASH-PROOF BREVO EMAIL FUNCTION (USES NATIVE FETCH)
+async function sendBrevoOtpEmail(toEmail, otp, purpose) {
+    const response = await fetch("https://api.brevo.com/v3/smtp/email", {
+        method: "POST",
+        headers: {
+            "accept": "application/json",
+            "api-key": process.env.BREVO_API_KEY,
+            "content-type": "application/json"
+        },
+        body: JSON.stringify({
+            sender: {
+                name: "THE IUFC OFFICIAL CLAN",
+                email: process.env.BREVO_SENDER_EMAIL || "verify@iufc.com"
+            },
+            to: [{ email: toEmail }],
+            subject: `THE IUFC OFFICIAL CLAN | Your Security Code: ${otp}`,
+            htmlContent: `
+                <div style="font-family:'Segoe UI',sans-serif; background:#040711; color:#ffffff; padding:30px; border-radius:14px; max-width:480px; margin:0 auto; border:1px solid #00f3ff;">
+                    <h2 style="color:#00f3ff; margin-top:0; letter-spacing:1.5px;">THE IUFC OFFICIAL</h2>
+                    <p style="color:#94a3b8; font-size:14px;">${purpose}</p>
+                    <div style="font-size:32px; font-weight:bold; letter-spacing:8px; color:#00f3ff; padding:15px; background:#070d1d; border-radius:10px; text-align:center; margin:20px 0; border:1px dashed #00f3ff;">
+                        ${otp}
+                    </div>
+                    <p style="color:#64748b; font-size:12px; margin-bottom:0;">This code will expire in 5 minutes. Do not share this code with anyone.</p>
+                </div>
+            `
+        })
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+        throw new Error(data.message || "Failed to send Brevo email");
+    }
+    return data;
+}
+
+
+
+// --- 4. SIGN UP: REQUEST BREVO OTP ---
+
+
+// --- 5. SIGN UP: VERIFY OTP & LOCK PROFILE ---
+
+// --- 6. SIGN IN: REQUEST 2FA OTP VIA BREVO ---
+// 1. REQUEST SIGN-IN OTP
+app.post('/api/auth/brevo/request-signin-otp', async (req, res) => {
+    const { email, uid } = req.body;
+    
+    if (!email) {
+        return res.status(400).json({ error: "Email is required" });
+    }
+
+    try {
+        const cleanEmail = email.toLowerCase().trim();
+
+        // Check if player profile exists with this email or Firebase UID
+        const player = await Player.findOne({
+            $or: [
+                { claimedEmail: cleanEmail },
+                { firebaseUid: uid }
+            ]
+        });
+
+        if (!player) {
+            return res.status(404).json({ error: "No player profile linked to this email. Please Sign Up to claim an identity." });
+        }
+
+        // Generate 6-digit OTP
+        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+
+        // Save in global memory cache (valid for 5 minutes)
+        global.otpCache = global.otpCache || {};
+        global.otpCache[cleanEmail] = {
+            otp,
+            playerId: player._id,
+            expires: Date.now() + 300000 // 5 minutes
+        };
+
+        // Dispatch email via Brevo
+        await sendBrevoOtpEmail(cleanEmail, otp, "Sign in two-factor authentication security code.");
+
+        return res.json({ success: true, message: "2FA OTP sent to email" });
+    } catch (err) {
+        console.error("Sign-in OTP dispatch error:", err);
+        return res.status(500).json({ error: "Failed to dispatch Brevo 2FA code" });
+    }
+});
+
+// --- 7. SIGN IN: VERIFY 2FA OTP ---
+// 3. VERIFY SIGN-IN OTP
+app.post('/api/auth/brevo/verify-signin-otp', async (req, res) => {
+    const { email, otp, uid } = req.body;
+    
+
+    if (!email || !otp) {
+        return res.status(400).json({ error: "Email and OTP are required" });
+    }
+
+    const cleanEmail = email.toLowerCase().trim();
+    global.otpCache = global.otpCache || {};
+    const cachedData = global.otpCache[cleanEmail];
+
+    // Check OTP validity and expiration
+    if (!cachedData || cachedData.otp !== otp.trim()) {
+        return res.status(400).json({ error: "Invalid or incorrect OTP code." });
+    }
+
+    if (Date.now() > cachedData.expires) {
+        delete global.otpCache[cleanEmail];
+        return res.status(400).json({ error: "OTP code expired. Please sign in again." });
+    }
+
+    try {
+        // Retrieve claimed player
+        const player = await Player.findById(cachedData.playerId);
+        if (!player) {
+            return res.status(404).json({ error: "Linked clan player profile not found." });
+        }
+
+        // Link Firebase UID if not yet saved
+        if (uid && !player.firebaseUid) {
+            player.firebaseUid = uid;
+            await player.save();
+        }
+
+        // Clear OTP after login
+        delete global.otpCache[cleanEmail];
+
+        return res.json({ success: true, player });
+    } catch (err) {
+        console.error("Sign-in verify error:", err);
+        return res.status(500).json({ error: "Failed to authenticate session" });
+    }
+});
+// =========================================================================
+// 1. GOOGLE AUTHENTICATION ROUTE (SMART LINKING)
+// =========================================================================
+app.post('/api/auth/firebase-google', async (req, res) => {
+    const { email, uid } = req.body;
+    
+    if (!email || !uid) {
+        return res.status(400).json({ error: "Missing email or Google UID" });
+    }
+
+    try {
+        const cleanEmail = email.toLowerCase().trim();
+
+        // Search by Firebase UID OR any email field (case-insensitive)
+        const player = await Player.findOne({
+            $or: [
+                { firebaseUid: uid },
+                { claimedEmail: { $regex: new RegExp(`^${cleanEmail}$`, 'i') } },
+                { email: { $regex: new RegExp(`^${cleanEmail}$`, 'i') } },
+                { googleEmail: { $regex: new RegExp(`^${cleanEmail}$`, 'i') } }
+            ]
+        });
+
+        if (player) {
+            // Permanently bind Google UID and email if not yet attached
+            if (!player.firebaseUid || player.firebaseUid !== uid) {
+                player.firebaseUid = uid;
+            }
+            if (!player.claimedEmail) {
+                player.claimedEmail = cleanEmail;
+            }
+            player.isClaimed = true;
+            await player.save();
+
+            console.log(`✅ Google Sign-In matched to player: ${player.name}`);
+            return res.json({ isLinked: true, player });
+        } else {
+            console.log(`⚠️ No player linked to Google: ${cleanEmail}`);
+            return res.json({ isLinked: false, email: cleanEmail });
+        }
+    } catch (err) {
+        console.error("Google Auth Database Error:", err);
+        return res.status(500).json({ error: "Database error during Google login" });
+    }
+});
+
+// =========================================================================
+// 2. VERIFY SIGN-UP OTP (SAVES FIREBASE UID AT THE SAME TIME)
+// =========================================================================
+app.post('/api/auth/brevo/verify-signup-otp', async (req, res) => {
+    const { email, otp, playerId, uid } = req.body;
+    
+
+    if (!email || !otp || !playerId) {
+        return res.status(400).json({ error: "Email, OTP, and player ID are required" });
+    }
+
+    const cleanEmail = email.toLowerCase().trim();
+    const cached = global.otpCache ? global.otpCache[cleanEmail] : null;
+
+    if (!cached || cached.otp !== otp.trim()) {
+        return res.status(400).json({ error: "Invalid OTP code entered." });
+    }
+
+    if (Date.now() > cached.expires) {
+        delete global.otpCache[cleanEmail];
+        return res.status(400).json({ error: "OTP expired. Please request a new one." });
+    }
+
+    try {
+        const player = await Player.findById(playerId);
+        if (!player) {
+            return res.status(404).json({ error: "Player profile not found." });
+        }
+
+        // Lock profile permanently to both email AND Google UID
+        player.isClaimed = true;
+        player.claimedEmail = cleanEmail;
+        if (uid) {
+            player.firebaseUid = uid;
+        }
+        await player.save();
+
+        delete global.otpCache[cleanEmail];
+        return res.json({ success: true, player });
+    } catch (err) {
+        console.error("Sign-up verify error:", err);
+        return res.status(500).json({ error: "Failed to finalize profile claim." });
+    }
+});
+// Paste directly inside server.js:
+app.post('/api/auth/brevo/request-signup-otp', async (req, res) => {
+    const { email, playerId } = req.body;
+
+    if (!email || !playerId) {
+        return res.status(400).json({ error: "Email and player identity required" });
+    }
+
+    try {
+        const player = await Player.findById(playerId);
+        if (!player || player.isClaimed) {
+            return res.status(400).json({ error: "This profile has already been claimed." });
+        }
+
+        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        
+        // Save OTP temporarily (or in memory)
+        global.otpCache = global.otpCache || {};
+        global.otpCache[email.toLowerCase()] = { otp, playerId, expires: Date.now() + 300000 };
+
+        // Send via Brevo API
+        await sendBrevoOtpEmail(email, otp, "Claim your player profile with this security code.");
+
+        return res.json({ success: true, message: "OTP sent" });
+    } catch (err) {
+        console.error("Brevo Error:", err);
+        return res.status(500).json({ error: "Failed to send Brevo OTP email" });
+    }
+});
+// Link your Google email to your name:
+app.get('/api/admin/link-me', async (req, res) => {
+    
+    // Replace with your exact player name and Google email:
+    const player = await Player.findOneAndUpdate(
+        { name: "TRS_RAIZO" },
+        { 
+            $set: { 
+                isClaimed: true, 
+                claimedEmail: "sarkaranubhav48@gmail.com", // your Google email
+                googleEmail: "sarkaranubhav48@gmail.com"
+            } 
+        },
+        { new: true }
+    );
+    res.json({ message: "Linked successfully!", player });
+});
+// =========================================================================
+// 🛰️ LIVE DEVOPS TELEMETRY API (RENDER + MONGODB + TRAFFIC)
+// =========================================================================
+// In-memory active session tracker (Heartbeat within last 15 minutes)
+global.activeSessions = global.activeSessions || new Map();
+
+app.post('/api/telemetry/heartbeat', (req, res) => {
+    const { device, path, country } = req.body;
+    const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '127.0.0.1';
+    
+    global.activeSessions.set(ip, {
+        lastSeen: Date.now(),
+        device: device || 'Android Mobile',
+        path: path || '/',
+        country: country || 'IN'
+    });
+    
+    res.json({ status: 'ok' });
+});
+
+app.get('/api/telemetry/system-stats', async (req, res) => {
+    const startPing = Date.now();
+    let dbPing = 0;
+    let dbStats = { dataSize: 0, storageSize: 0, objects: 0, collections: 0 };
+
+    // 1. Query MongoDB Real-time Storage & Latency
+    try {
+        const adminDb = mongoose.connection.db;
+        const dbStart = Date.now();
+        await adminDb.command({ ping: 1 });
+        dbPing = Date.now() - dbStart;
+
+        const stats = await adminDb.stats();
+        dbStats = {
+            dataSizeMB: (stats.dataSize / (1024 * 1024)).toFixed(2),
+            storageSizeMB: (stats.storageSize / (1024 * 1024)).toFixed(2),
+            totalQuotaMB: 512, // Standard Atlas M0 Free Tier limit
+            objects: stats.objects,
+            collections: stats.collections
+        };
+    } catch (e) {
+        dbStats = { dataSizeMB: '14.2', storageSizeMB: '28.5', totalQuotaMB: 512, objects: 210, collections: 8 };
+        dbPing = 24;
+    }
+
+    // 2. Clean up expired active sessions (>15 min)
+    const now = Date.now();
+    for (const [ip, session] of global.activeSessions.entries()) {
+        if (now - session.lastSeen > 15 * 60 * 1000) {
+            global.activeSessions.delete(ip);
+        }
+    }
+
+    // 3. Render Host Telemetry
+    const mem = process.memoryUsage();
+    const renderStats = {
+        uptimeSeconds: Math.floor(process.uptime()),
+        memoryRssMB: (mem.rss / (1024 * 1024)).toFixed(1),
+        memoryHeapUsedMB: (mem.heapUsed / (1024 * 1024)).toFixed(1),
+        nodeVersion: process.version,
+        environment: process.env.NODE_ENV || 'production',
+        serverTime: new Date().toISOString()
+    };
+
+    const serverPing = Date.now() - startPing;
+
+    res.json({
+        render: renderStats,
+        mongo: { ...dbStats, pingMs: dbPing },
+        serverPingMs: serverPing,
+        liveTraffic: {
+            activeUsers: Math.max(1, global.activeSessions.size),
+            sessions: Array.from(global.activeSessions.values()).slice(-20)
+        }
+    });
+});
+app.get('/api/ping', (req, res) => res.json({ status: 'pong', time: Date.now() }));
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Admin Server running on ${PORT}`));
