@@ -104,12 +104,54 @@ const PlayerSchema = new mongoose.Schema({
     },
 
     // Season Summary (Manual totals)
-    seasonStats: {
-        wins: { type: Number, default: 0 },
-        draws: { type: Number, default: 0 },
-        losses: { type: Number, default: 0 },
-        goals: { type: Number, default: 0 }
-    },
+    tournamentStats: [
+    {
+        tourId: {
+            type: String,
+            required: true
+        },
+        tourName: {
+            type: String,
+            default: "Tournament"
+        },
+        rank: {
+            type: String,
+            default: ""
+        },
+        wins: {
+            type: Number,
+            default: 0
+        },
+        draws: {
+            type: Number,
+            default: 0
+        },
+        losses: {
+            type: Number,
+            default: 0
+        },
+        played: {
+            type: Number,
+            default: 0
+        },
+        goals: {
+            type: Number,
+            default: 0
+        },
+        points: {
+            type: Number,
+            default: 0
+        },
+        efficiency: {
+            type: String,
+            default: "0.00"
+        },
+        updatedAt: {
+            type: Date,
+            default: Date.now
+        }
+    }
+],
 
     // Trophies count
     trophies: {
@@ -127,6 +169,43 @@ const PlayerSchema = new mongoose.Schema({
 });
 
 const Player = mongoose.model('Player', PlayerSchema);
+// ================= ROUTE: UPDATE PLAYER TOURNAMENT STATS =================
+// PUT /api/players/:id/tournament-stats
+app.put('/players/:id/tournament-stats', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const newStats = req.body; // { tourId, tourName, rank, wins, draws, ... }
+
+        const player = await Player.findById(id);
+        if (!player) {
+            return res.status(404).json({ error: "Player not found" });
+        }
+
+        if (!player.tournamentStats) {
+            player.tournamentStats = [];
+        }
+
+        // If stats for this tournament already exist, update them; otherwise, add new
+        const existingIndex = player.tournamentStats.findIndex(
+            t => String(t.tourId) === String(newStats.tourId)
+        );
+
+        if (existingIndex > -1) {
+            player.tournamentStats[existingIndex] = newStats;
+        } else {
+            player.tournamentStats.push(newStats);
+        }
+
+        // Mark as modified if using mixed/array schema
+        player.markModified('tournamentStats');
+        await player.save();
+
+        res.json({ success: true, message: "Tournament stats saved", tournamentStats: player.tournamentStats });
+    } catch (err) {
+        console.error("Tournament stats error:", err);
+        res.status(500).json({ error: err.message });
+    }
+});
 
 // DELETE TOURNAMENT + ALL ITS FIXTURES & STANDINGS
 app.delete('/api/smart/tournament/:id', async (req, res) => {
