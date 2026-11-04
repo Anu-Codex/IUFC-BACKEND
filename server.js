@@ -1030,8 +1030,8 @@ app.get('/api/market/listings', async (req, res) => {
 
 // Add these to your existing server.js
 
-const ADMIN_EMAIL = "admin@nexus.com";
-const ADMIN_PASS = "admin@nexus123"; // You should use environment variables for this!
+const ADMIN_EMAIL = "admin@iufc.com";
+const ADMIN_PASS = "admin@iufc123"; // You should use environment variables for this!
 
 app.post('/api/login', (req, res) => {
     const { email, password } = req.body;
@@ -3890,7 +3890,7 @@ const highlightSchema = new mongoose.Schema({
 const router = express.Router();
 
 // 1. ADD A HIGHLIGHT VIDEO CLIP
-router.post('/players/:id/highlights', async (req, res) => {
+app.post('/players/:id/highlights', async (req, res) => {
     try {
         const { title, url } = req.body;
         if (!title || !url) {
@@ -3910,7 +3910,7 @@ router.post('/players/:id/highlights', async (req, res) => {
 });
 
 // 2. DELETE A HIGHLIGHT VIDEO CLIP BY INDEX
-router.delete('/players/:id/highlights/:clipIndex', async (req, res) => {
+app.delete('/players/:id/highlights/:clipIndex', async (req, res) => {
     try {
         const index = parseInt(req.params.clipIndex);
         const player = await Player.findById(req.params.id);
